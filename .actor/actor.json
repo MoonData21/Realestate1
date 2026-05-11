@@ -1,0 +1,13 @@
+{
+  "actorSpecification": 1,
+  "name": "real-estate-comp-puller",
+  "title": "Real Estate Comp Puller",
+  "description": "MCP server that pulls recently-sold comps from Zillow & Redfin for a given address and returns a structured analysis with suggested value range, avg $/sqft, and supporting comp list.",
+  "version": "0.1",
+  "buildTag": "latest",
+  "usesStandbyMode": true,
+  "webServerPort": 3000,
+  "webServerMcpPath": "/mcp",
+  "dockerfile": "./Dockerfile",
+  "categories": ["REAL_ESTATE", "AI", "MCP_SERVERS"]
+}

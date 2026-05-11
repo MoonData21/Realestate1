@@ -1,0 +1,14 @@
+{
+  "actorChargeEvents": {
+    "comp-report-generated": {
+      "eventTitle": "Comp Report Generated",
+      "eventDescription": "Charged once per successful comp analysis report returned to the user.",
+      "eventPriceCents": 90
+    },
+    "comp-report-no-results": {
+      "eventTitle": "Comp Report - No Results",
+      "eventDescription": "Charged when a report is attempted but no matching comps are found.",
+      "eventPriceCents": 10
+    }
+  }
+}
