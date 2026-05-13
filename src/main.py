@@ -5,17 +5,15 @@ Runs in Apify Standby mode and exposes an MCP tool: get_comps
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
 from typing import Any
 
 import uvicorn
 from apify import Actor
 from mcp.server import Server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.streamable_http import StreamableHTTPServerTransport
 from mcp.types import (
     TextContent,
     Tool,
@@ -23,8 +21,7 @@ from mcp.types import (
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Mount, Route
-from starlette.types import Receive, Scope, Send
+from starlette.routing import Route
 
 from .analysis import analyze_comps, filter_comps
 from .redfin import fetch_redfin_comps
@@ -209,22 +206,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 # Starlette app — wraps MCP over Streamable HTTP
 # ---------------------------------------------------------------------------
 
-session_manager = StreamableHTTPSessionManager(
-    app=mcp_server,
-    event_store=None,
-    json_response=False,
-    stateless=False,
-)
-
-
-@contextlib.asynccontextmanager
-async def lifespan(app: Starlette) -> AsyncIterator[None]:
-    async with session_manager.run():
-        yield
-
-
-async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
-    await session_manager.handle_request(scope, receive, send)
+async def handle_mcp(request: Request) -> Response:
+    """Handle MCP Streamable HTTP requests."""
+    transport = StreamableHTTPServerTransport(mcp_path="/mcp")
+    async with transport.connect() as streams:
+        read_stream, write_stream = streams
+        await mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp_server.create_initialization_options(),
+        )
+    return Response()
 
 
 async def handle_health(request: Request) -> Response:
@@ -232,53 +224,6 @@ async def handle_health(request: Request) -> Response:
     if "x-apify-container-server-readiness-probe" in request.headers:
         return Response("ok", status_code=200)
     return JSONResponse({"status": "ok", "server": "real-estate-comp-puller"})
-
-
-async def handle_analyze(request: Request) -> JSONResponse:
-    """REST endpoint — same logic as the get_comps MCP tool."""
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-
-    address: str | None = body.get("address")
-    if not address or not isinstance(address, str):
-        return JSONResponse({"error": "address (string) is required"}, status_code=422)
-
-    beds: int | None = body.get("beds")
-    baths: float | None = body.get("baths")
-    sqft: int | None = body.get("sqft")
-    sqft_tolerance_pct: float = float(body.get("sqft_tolerance_pct", 20))
-    radius_miles: float = float(body.get("radius_miles", 0.5))
-    max_results: int = int(body.get("max_results_per_source", 25))
-
-    if not _validate_address(address):
-        return JSONResponse({
-            "comp_count": 0,
-            "error": "Invalid or incomplete address. Please provide a full US street address, e.g. '123 Main St, Austin, TX 78701'.",
-        }, status_code=422)
-
-    logger.info("analyze called for address: %s", address)
-
-    zillow_comps, redfin_comps = await asyncio.gather(
-        asyncio.to_thread(fetch_zillow_comps, address, radius_miles, beds, baths, max_results),
-        asyncio.to_thread(fetch_redfin_comps, address, radius_miles, beds, baths, max_results),
-    )
-    all_comps = zillow_comps + redfin_comps
-
-    filtered = filter_comps(
-        comps=all_comps,
-        subject_lat=None,
-        subject_lon=None,
-        radius_miles=radius_miles,
-        beds=beds,
-        baths=baths,
-        subject_sqft=sqft,
-        sqft_tolerance_pct=sqft_tolerance_pct,
-    )
-
-    result = analyze_comps(filtered, address=address)
-    return JSONResponse(result)
 
 
 async def handle_root(request: Request) -> HTMLResponse:
@@ -300,7 +245,7 @@ async def handle_root(request: Request) -> HTMLResponse:
   "mcpServers": {{
     "real-estate-comp-puller": {{
       "type": "http",
-      "url": "{actor_url}/mcp/",
+      "url": "{actor_url}/mcp",
       "headers": {{
         "Authorization": "Bearer YOUR_APIFY_TOKEN"
       }}
@@ -318,12 +263,10 @@ async def handle_root(request: Request) -> HTMLResponse:
 
 
 app = Starlette(
-    lifespan=lifespan,
     routes=[
         Route("/", handle_root),
         Route("/health", handle_health),
-        Route("/analyze", handle_analyze, methods=["POST"]),
-        Mount("/mcp", app=handle_mcp),
+        Route("/mcp", handle_mcp, methods=["GET", "POST"]),
     ]
 )
 
@@ -334,7 +277,7 @@ app = Starlette(
 
 async def main() -> None:
     async with Actor:
-        port = int(os.environ.get("ACTOR_STANDBY_PORT", os.environ.get("APIFY_CONTAINER_PORT", os.environ.get("PORT", 3000))))
+        port = int(os.environ.get("ACTOR_STANDBY_PORT", os.environ.get("APIFY_CONTAINER_PORT", 3000)))
         logger.info("Starting Real Estate Comp Puller MCP server on port %d", port)
         config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
         server = uvicorn.Server(config)
