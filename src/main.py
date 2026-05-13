@@ -5,15 +5,17 @@ Runs in Apify Standby mode and exposes an MCP tool: get_comps
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from typing import Any
 
 import uvicorn
 from apify import Actor
 from mcp.server import Server
-from mcp.server.streamable_http import StreamableHTTPServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import (
     TextContent,
     Tool,
@@ -21,7 +23,8 @@ from mcp.types import (
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.types import Receive, Scope, Send
 
 from .analysis import analyze_comps, filter_comps
 from .redfin import fetch_redfin_comps
@@ -214,17 +217,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 # Starlette app — wraps MCP over Streamable HTTP
 # ---------------------------------------------------------------------------
 
-async def handle_mcp(request: Request) -> Response:
-    """Handle MCP Streamable HTTP requests."""
-    transport = StreamableHTTPServerTransport(mcp_path="/mcp")
-    async with transport.connect() as streams:
-        read_stream, write_stream = streams
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options(),
-        )
-    return Response()
+session_manager = StreamableHTTPSessionManager(
+    app=mcp_server,
+    event_store=None,
+    json_response=False,
+    stateless=False,
+)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: Starlette) -> AsyncIterator[None]:
+    async with session_manager.run():
+        yield
+
+
+async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
+    await session_manager.handle_request(scope, receive, send)
 
 
 async def handle_health(request: Request) -> Response:
@@ -253,7 +261,7 @@ async def handle_root(request: Request) -> HTMLResponse:
   "mcpServers": {{
     "real-estate-comp-puller": {{
       "type": "http",
-      "url": "{actor_url}/mcp",
+      "url": "{actor_url}/mcp/",
       "headers": {{
         "Authorization": "Bearer YOUR_APIFY_TOKEN"
       }}
@@ -271,10 +279,11 @@ async def handle_root(request: Request) -> HTMLResponse:
 
 
 app = Starlette(
+    lifespan=lifespan,
     routes=[
         Route("/", handle_root),
         Route("/health", handle_health),
-        Route("/mcp", handle_mcp, methods=["GET", "POST"]),
+        Mount("/mcp", app=handle_mcp),
     ]
 )
 
