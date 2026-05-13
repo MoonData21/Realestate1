@@ -7,7 +7,7 @@
   "buildTag": "latest",
   "usesStandbyMode": true,
   "webServerPort": 3000,
-  "webServerMcpPath": "/mcp",
+  "webServerMcpPath": "/mcp/",
   "dockerfile": "./Dockerfile",
   "categories": ["REAL_ESTATE", "AI", "MCP_SERVERS"]
 }
