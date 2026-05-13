@@ -156,34 +156,42 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             "error": "Invalid or incomplete address. Please provide a full US street address, e.g. '123 Main St, Austin, TX 78701'.",
         }, indent=2))]
 
-    # --- Fetch from both sources concurrently ---
-    zillow_comps, redfin_comps = await asyncio.gather(
-        asyncio.to_thread(fetch_zillow_comps, address, radius_miles, beds, baths, max_results),
-        asyncio.to_thread(fetch_redfin_comps, address, radius_miles, beds, baths, max_results),
-    )
-    all_comps = zillow_comps + redfin_comps
+    async def _fetch_and_filter(search_radius: float) -> list[dict]:
+        z, r = await asyncio.gather(
+            asyncio.to_thread(fetch_zillow_comps, address, search_radius, beds, baths, max_results),
+            asyncio.to_thread(fetch_redfin_comps, address, search_radius, beds, baths, max_results),
+        )
+        logger.info("Raw comps @ %.1f mi — Zillow: %d, Redfin: %d", search_radius, len(z), len(r))
+        return filter_comps(
+            comps=z + r,
+            subject_lat=None,
+            subject_lon=None,
+            radius_miles=search_radius,
+            beds=beds,
+            baths=baths,
+            subject_sqft=sqft,
+            sqft_tolerance_pct=sqft_tolerance_pct,
+        )
 
-    logger.info(
-        "Raw comps — Zillow: %d, Redfin: %d, Total: %d",
-        len(zillow_comps),
-        len(redfin_comps),
-        len(all_comps),
-    )
+    # --- Fetch, auto-expanding radius if nothing found ---
+    actual_radius = radius_miles
+    filtered = await _fetch_and_filter(radius_miles)
 
-    # --- Filter ---
-    filtered = filter_comps(
-        comps=all_comps,
-        subject_lat=None,
-        subject_lon=None,
-        radius_miles=radius_miles,
-        beds=beds,
-        baths=baths,
-        subject_sqft=sqft,
-        sqft_tolerance_pct=sqft_tolerance_pct,
-    )
+    if not filtered:
+        for expanded_radius in [2.0, 5.0]:
+            if expanded_radius <= radius_miles:
+                continue
+            logger.info("No comps found at %.1f mi — expanding to %.1f mi", actual_radius, expanded_radius)
+            filtered = await _fetch_and_filter(expanded_radius)
+            actual_radius = expanded_radius
+            if filtered:
+                break
 
     # --- Analyze ---
     result = analyze_comps(filtered, address=address)
+    if actual_radius != radius_miles:
+        result["search_radius_miles"] = actual_radius
+        result["note"] = f"No comps found at {radius_miles} mi. Results expanded to {actual_radius} mi radius."
 
     # --- Charge PPE event ---
     if result.get("comp_count", 0) > 0:
